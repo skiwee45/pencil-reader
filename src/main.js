@@ -622,7 +622,7 @@ function bindAnnotationSurface(view) {
   let preview = null;
 
   view.surface.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0 || event.target.closest("[data-annotation-id]")) return;
+    if (event.button !== 0 || event.target.closest(".annotation-note")) return;
 
     const point = getSurfacePoint(event, view.surface);
     gesture = {
