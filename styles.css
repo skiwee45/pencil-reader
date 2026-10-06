@@ -711,12 +711,19 @@ button {
 
 .page-placeholder {
   position: absolute;
+  z-index: 2;
   top: 50%;
   left: 50%;
   color: #bbb7ae;
   font-family: Georgia, "Times New Roman", serif;
   font-size: 12px;
+  text-align: center;
   transform: translate(-50%, -50%);
+}
+
+.pdf-page.has-render-error .page-placeholder {
+  width: min(75%, 300px);
+  color: #8f4e42;
 }
 
 .annotation-surface {

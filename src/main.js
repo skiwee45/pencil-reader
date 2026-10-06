@@ -9,8 +9,13 @@ import {
 } from "./storage.js";
 
 const PDFJS_VERSION = "6.4.299";
-const PDFJS_URL = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}/build/pdf.mjs`;
-const PDFJS_WORKER_URL = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}/build/pdf.worker.mjs`;
+const PDFJS_BASE_URL = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}`;
+const PDFJS_URL = `${PDFJS_BASE_URL}/build/pdf.mjs`;
+const PDFJS_WORKER_URL = `${PDFJS_BASE_URL}/build/pdf.worker.mjs`;
+const PDFJS_CMAP_URL = `${PDFJS_BASE_URL}/cmaps/`;
+const PDFJS_ICC_URL = `${PDFJS_BASE_URL}/iccs/`;
+const PDFJS_STANDARD_FONT_URL = `${PDFJS_BASE_URL}/standard_fonts/`;
+const PDFJS_WASM_URL = `${PDFJS_BASE_URL}/wasm/`;
 
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 2.5;
@@ -81,6 +86,7 @@ const state = {
   sidecarWriteInProgress: false,
   sidecarWritePending: false,
   sidecarGeneration: 0,
+  renderErrorShown: false,
 };
 
 bindControls();
@@ -206,7 +212,15 @@ async function openPdf(file) {
   try {
     const data = new Uint8Array(await file.arrayBuffer());
     if (state.openToken !== openToken) return;
-    state.loadingTask = state.pdfjs.getDocument({ data });
+    state.loadingTask = state.pdfjs.getDocument({
+      data,
+      cMapUrl: PDFJS_CMAP_URL,
+      cMapPacked: true,
+      iccUrl: PDFJS_ICC_URL,
+      standardFontDataUrl: PDFJS_STANDARD_FONT_URL,
+      wasmUrl: PDFJS_WASM_URL,
+      useWasm: true,
+    });
     state.loadingTask.onProgress = ({ loaded, total }) => {
       if (!total) return;
       const percent = Math.min(100, Math.round((loaded / total) * 100));
@@ -328,6 +342,7 @@ function createPageView(pageNumber, pdfPage, baseViewport) {
     renderTask: null,
     renderScale: null,
     renderingScale: null,
+    failedRenderScale: null,
     visible: false,
   };
 
@@ -364,7 +379,14 @@ function handlePageVisibility(entries) {
 }
 
 async function renderPage(view) {
-  if (!state.pdf || !view.visible || view.renderScale === state.zoom) return;
+  if (
+    !state.pdf ||
+    !view.visible ||
+    view.renderScale === state.zoom ||
+    view.failedRenderScale === state.zoom
+  ) {
+    return;
+  }
 
   if (view.renderTask) {
     if (view.renderingScale !== state.zoom) view.renderTask.cancel();
@@ -389,10 +411,23 @@ async function renderPage(view) {
     await view.renderTask.promise;
     if (requestedZoom === state.zoom) {
       view.renderScale = requestedZoom;
+      view.failedRenderScale = null;
+      view.element.classList.remove("has-render-error");
+      view.placeholder.textContent = `Page ${view.pageNumber}`;
       view.placeholder.hidden = true;
     }
   } catch (error) {
-    if (error?.name !== "RenderingCancelledException") console.error(error);
+    if (error?.name !== "RenderingCancelledException") {
+      console.error(error);
+      view.failedRenderScale = requestedZoom;
+      view.element.classList.add("has-render-error");
+      view.placeholder.textContent = `Page ${view.pageNumber} could not be rendered`;
+      view.placeholder.hidden = false;
+      if (!state.renderErrorShown) {
+        state.renderErrorShown = true;
+        showToast("A page image could not be decoded. Try reopening the PDF.", 7000);
+      }
+    }
   } finally {
     view.renderTask = null;
     view.renderingScale = null;
@@ -1217,6 +1252,7 @@ function destroyCurrentDocument() {
   state.documentName = null;
   state.annotations = new Map();
   state.undoStack = [];
+  state.renderErrorShown = false;
   state.sidecarHandle = null;
   state.sidecarFileName = null;
   state.sidecarWriteInProgress = false;
