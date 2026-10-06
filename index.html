@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="A quiet, local-first PDF reader for lines and visible margin notes."
+    />
+    <title>Pencil Reader</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="toolbar" aria-label="Reader controls">
+      <div class="toolbar__identity">
+        <div class="wordmark" aria-label="Pencil Reader">
+          <svg aria-hidden="true" viewBox="0 0 24 24">
+            <path d="m4 20 4.1-1 10.8-10.8a2.4 2.4 0 0 0-3.4-3.4L4.7 15.6 4 20Z" />
+            <path d="m14.4 5.9 3.4 3.4M4.8 15.5l3.6 3.6" />
+          </svg>
+          <span>Pencil</span>
+        </div>
+
+        <button class="button button--primary" id="open-button" type="button" disabled>
+          <svg aria-hidden="true" viewBox="0 0 24 24">
+            <path d="M4 7.5h6l1.7 2H20v8.7a1.8 1.8 0 0 1-1.8 1.8H5.8A1.8 1.8 0 0 1 4 18.2V7.5Z" />
+            <path d="M4 9.5V5.8A1.8 1.8 0 0 1 5.8 4h3.7l1.8 2H17" />
+          </svg>
+          <span>Open PDF</span>
+        </button>
+        <input id="file-input" type="file" accept="application/pdf,.pdf" hidden />
+
+        <div class="notes-menu" id="notes-menu">
+          <button
+            class="button button--quiet notes-menu-button"
+            id="notes-button"
+            type="button"
+            aria-label="Notes file menu"
+            aria-controls="notes-popover"
+            aria-expanded="false"
+            disabled
+          >
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M7 3.8h7l3 3V20H7V3.8Z" />
+              <path d="M14 3.8v3h3M9.5 11.5h5M9.5 15h5" />
+            </svg>
+            <span>Notes</span>
+            <i class="notes-status-dot" aria-hidden="true"></i>
+          </button>
+
+          <div class="notes-popover" id="notes-popover" role="dialog" aria-label="Notes file" hidden>
+            <p>Notes file</p>
+            <button class="notes-menu-action" id="load-notes-button" type="button" disabled>
+              <svg aria-hidden="true" viewBox="0 0 24 24">
+                <path d="M7 3.8h7l3 3V20H7V3.8Z" />
+                <path d="M14 3.8v3h3M12 10v6M9.5 13.5 12 16l2.5-2.5" />
+              </svg>
+              <span>Load notes file…</span>
+            </button>
+            <button class="notes-menu-action" id="save-notes-button" type="button" disabled>
+              <svg aria-hidden="true" viewBox="0 0 24 24">
+                <path d="M6 4h10l2 2v14H6V4Z" />
+                <path d="M9 4v5h6V4M9 20v-7h6v7" />
+              </svg>
+              <span id="save-notes-label">Save notes file…</span>
+            </button>
+            <div class="notes-file-status" id="notes-status-text" aria-live="polite">
+              Browser backup only
+            </div>
+          </div>
+        </div>
+        <input id="notes-file-input" type="file" accept="application/json,.json" hidden />
+      </div>
+
+      <div class="document-title" id="document-title" title="No PDF open">No PDF open</div>
+
+      <div class="toolbar__reading-controls">
+        <div class="page-indicator" id="page-indicator" aria-live="polite">
+          <input
+            class="page-number-input"
+            id="current-page"
+            type="text"
+            value="–"
+            inputmode="numeric"
+            aria-label="Current page. Enter a page number to navigate."
+            disabled
+          />
+          <span class="muted">/</span>
+          <span id="page-count">–</span>
+        </div>
+
+        <div class="zoom-controls" aria-label="Zoom controls">
+          <button class="icon-button" id="zoom-out" type="button" aria-label="Zoom out" disabled>−</button>
+          <button class="zoom-value" id="zoom-reset" type="button" aria-label="Reset zoom" disabled>100%</button>
+          <button class="icon-button" id="zoom-in" type="button" aria-label="Zoom in" disabled>+</button>
+        </div>
+
+        <div class="text-size-controls" aria-label="Note text size">
+          <button class="text-size-button" id="text-size-down" type="button" aria-label="Decrease note text size" disabled>A−</button>
+          <input
+            class="text-size-value"
+            id="text-size-input"
+            type="text"
+            value="16"
+            inputmode="numeric"
+            aria-label="Note text size in pixels"
+            disabled
+          />
+          <button class="text-size-button" id="text-size-up" type="button" aria-label="Increase note text size" disabled>A+</button>
+        </div>
+
+        <div class="help-menu" id="help-menu">
+          <button
+            class="help-button"
+            id="help-button"
+            type="button"
+            aria-label="Show annotation help"
+            aria-controls="help-popover"
+            aria-expanded="false"
+          >?</button>
+          <div class="help-popover" id="help-popover" role="dialog" aria-label="Annotation help" hidden>
+            <p>How to annotate</p>
+            <ul>
+              <li><span>Drag</span> to draw a line</li>
+              <li><span>Click</span> to start a note</li>
+              <li><span>Right-click</span> to delete either</li>
+              <li><kbd>⌘Z</kbd> / <kbd>Ctrl+Z</kbd> to undo</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="workspace" id="workspace">
+      <section class="empty-state" id="empty-state">
+        <div class="empty-state__illustration" aria-hidden="true">
+          <div class="paper paper--back"></div>
+          <div class="paper paper--front">
+            <span></span><span></span><span></span><span></span>
+            <i></i>
+          </div>
+        </div>
+        <p class="eyebrow">A PDF reader with one tool</p>
+        <h1>Read with a pencil,<br />not a toolbar.</h1>
+        <p class="empty-state__description">
+          Click to write a note. Drag to draw a straight line.<br />Right-click either one to erase it.
+        </p>
+        <button class="button button--large" id="empty-open-button" type="button" disabled>
+          Choose a PDF
+        </button>
+        <p class="privacy-note">Your PDF and notes stay in this browser.</p>
+      </section>
+
+      <div class="viewer" id="viewer" aria-label="PDF pages"></div>
+
+      <div class="loading-panel" id="loading-panel" hidden aria-live="polite">
+        <span class="spinner" aria-hidden="true"></span>
+        <span id="loading-message">Opening PDF…</span>
+      </div>
+    </main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
