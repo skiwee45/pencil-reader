@@ -6,9 +6,11 @@
 - Click to begin a note.
 - Drag to draw a line.
 - Click an existing note to edit it.
-- Hold `Shift` to select and copy embedded PDF text.
+- Hold `Option/Alt` to select and copy embedded PDF text.
 - Right-click a note or line to delete it.
 - `Cmd/Ctrl + Z` to undo the last action.
+- `Cmd/Ctrl + F` to browse and search notes by page.
+- `Cmd/Ctrl + Shift + F` to search embedded PDF text by page.
 
 Saves notes in separate file, doesn't edit pdfs.
 

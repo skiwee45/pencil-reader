@@ -28,6 +28,8 @@ const NOTE_FONT_SIZE_STEP = 2;
 const SIDECAR_FORMAT = "pencil-reader-notes";
 const SIDECAR_VERSION = 1;
 const SIDECAR_AUTOSAVE_DELAY = 500;
+const NOTE_PREVIEW_LENGTH = 90;
+const SEARCH_CONTEXT_LENGTH = 55;
 
 const preferences = loadPreferences();
 
@@ -58,6 +60,17 @@ const elements = {
   helpMenu: document.querySelector("#help-menu"),
   helpButton: document.querySelector("#help-button"),
   helpPopover: document.querySelector("#help-popover"),
+  searchButton: document.querySelector("#search-button"),
+  readerShell: document.querySelector("#reader-shell"),
+  searchSidebar: document.querySelector("#search-sidebar"),
+  notesSearchTab: document.querySelector("#notes-search-tab"),
+  pdfSearchTab: document.querySelector("#pdf-search-tab"),
+  searchCloseButton: document.querySelector("#search-close-button"),
+  notesSearchField: document.querySelector("#notes-search-field"),
+  notesSearchInput: document.querySelector("#notes-search-input"),
+  pdfSearchField: document.querySelector("#pdf-search-field"),
+  pdfSearchInput: document.querySelector("#pdf-search-input"),
+  searchResults: document.querySelector("#search-results"),
   loadingPanel: document.querySelector("#loading-panel"),
   loadingMessage: document.querySelector("#loading-message"),
   toast: document.querySelector("#toast"),
@@ -88,6 +101,12 @@ const state = {
   sidecarGeneration: 0,
   renderErrorShown: false,
   textSelectionMode: false,
+  searchMode: "notes",
+  searchExpandedPages: new Set(),
+  searchReturnFocus: null,
+  pdfSearchStatus: "idle",
+  pdfSearchPages: [],
+  pdfSearchProgress: 0,
 };
 
 bindControls();
@@ -171,6 +190,28 @@ function bindControls() {
   elements.helpButton.addEventListener("click", () => {
     setHelpOpen(elements.helpPopover.hidden);
   });
+  elements.searchButton.addEventListener("click", () => {
+    if (elements.searchSidebar.hidden) openSearchSidebar("notes");
+    else closeSearchSidebar({ restoreFocus: true });
+  });
+  elements.notesSearchTab.addEventListener("click", () => {
+    setSearchMode("notes");
+    focusActiveSearchInput();
+  });
+  elements.pdfSearchTab.addEventListener("click", () => {
+    setSearchMode("pdf");
+    focusActiveSearchInput();
+  });
+  elements.searchCloseButton.addEventListener("click", () => {
+    closeSearchSidebar({ restoreFocus: true });
+  });
+  for (const input of [elements.notesSearchInput, elements.pdfSearchInput]) {
+    input.addEventListener("input", () => {
+      state.searchExpandedPages.clear();
+      elements.searchResults.scrollTop = 0;
+      renderSearchSidebar();
+    });
+  }
   document.addEventListener("pointerdown", (event) => {
     if (!elements.helpPopover.hidden && !elements.helpMenu.contains(event.target)) {
       setHelpOpen(false);
@@ -189,7 +230,7 @@ function bindControls() {
   window.addEventListener(
     "pointermove",
     (event) => {
-      if (state.textSelectionMode !== event.shiftKey) setTextSelectionMode(event.shiftKey);
+      if (state.textSelectionMode !== event.altKey) setTextSelectionMode(event.altKey);
     },
     { capture: true, passive: true },
   );
@@ -701,7 +742,7 @@ function bindAnnotationSurface(view) {
   view.surface.addEventListener("pointerdown", (event) => {
     if (
       event.button !== 0 ||
-      event.shiftKey ||
+      event.altKey ||
       state.textSelectionMode ||
       event.target.closest(".annotation-note")
     ) {
@@ -929,12 +970,17 @@ function undoLastAnnotationAction() {
 }
 
 function handleGlobalKeydown(event) {
-  if (event.key === "Shift") setTextSelectionMode(true);
+  if (event.key === "Alt") setTextSelectionMode(true);
 
   const modifier = event.metaKey || event.ctrlKey;
   const editingNote = event.target.closest?.(".annotation-note");
 
   if (event.key === "Escape") {
+    if (!elements.searchSidebar.hidden) {
+      event.preventDefault();
+      closeSearchSidebar({ restoreFocus: true });
+      return;
+    }
     if (!elements.helpPopover.hidden) {
       event.preventDefault();
       setHelpOpen(false, { restoreFocus: true });
@@ -945,6 +991,12 @@ function handleGlobalKeydown(event) {
       setNotesOpen(false, { restoreFocus: true });
       return;
     }
+  }
+
+  if (state.pdf && modifier && event.key.toLowerCase() === "f") {
+    event.preventDefault();
+    openSearchSidebar(event.shiftKey ? "pdf" : "notes");
+    return;
   }
 
   if (modifier && event.key.toLowerCase() === "o" && !editingNote && state.pdfjs) {
@@ -973,13 +1025,380 @@ function handleGlobalKeydown(event) {
 }
 
 function handleGlobalKeyup(event) {
-  if (event.key === "Shift") setTextSelectionMode(false);
+  if (event.key === "Alt") setTextSelectionMode(false);
 }
 
 function setTextSelectionMode(enabled) {
   if (state.textSelectionMode === enabled) return;
   state.textSelectionMode = enabled;
   elements.viewer.classList.toggle("is-text-selection-mode", enabled);
+}
+
+function openSearchSidebar(mode) {
+  if (!state.pdf) return;
+  if (elements.searchSidebar.hidden) {
+    state.searchReturnFocus = document.activeElement;
+  }
+
+  elements.searchSidebar.hidden = false;
+  elements.readerShell.classList.add("is-search-open");
+  setHelpOpen(false);
+  setNotesOpen(false);
+  setSearchMode(mode);
+  requestAnimationFrame(focusActiveSearchInput);
+}
+
+function closeSearchSidebar({ restoreFocus = false } = {}) {
+  if (elements.searchSidebar.hidden) return;
+  elements.searchSidebar.hidden = true;
+  elements.readerShell.classList.remove("is-search-open");
+  state.searchExpandedPages.clear();
+
+  if (restoreFocus && state.searchReturnFocus?.isConnected) {
+    state.searchReturnFocus.focus?.();
+  }
+  state.searchReturnFocus = null;
+}
+
+function setSearchMode(mode) {
+  if (mode !== "notes" && mode !== "pdf") return;
+  if (state.searchMode !== mode) {
+    state.searchExpandedPages.clear();
+    elements.searchResults.scrollTop = 0;
+  }
+  state.searchMode = mode;
+
+  const notesSelected = mode === "notes";
+  elements.notesSearchTab.setAttribute("aria-selected", String(notesSelected));
+  elements.notesSearchTab.tabIndex = notesSelected ? 0 : -1;
+  elements.pdfSearchTab.setAttribute("aria-selected", String(!notesSelected));
+  elements.pdfSearchTab.tabIndex = notesSelected ? -1 : 0;
+  elements.searchResults.setAttribute(
+    "aria-labelledby",
+    notesSelected ? "notes-search-tab" : "pdf-search-tab",
+  );
+  elements.notesSearchField.hidden = !notesSelected;
+  elements.pdfSearchField.hidden = notesSelected;
+  renderSearchSidebar();
+
+  if (!notesSelected) preparePdfSearchIndex();
+}
+
+function renderSearchSidebar() {
+  if (elements.searchSidebar.hidden || !state.pdf) return;
+  const previousScrollTop = elements.searchResults.scrollTop;
+  const query = normalizeSearchQuery(activeSearchInput().value);
+  elements.searchResults.replaceChildren();
+
+  if (state.searchMode === "notes") {
+    const groups = collectNoteGroups(query);
+    if (!groups.length) {
+      renderSearchMessage(query ? "No notes match this search." : "No notes yet.");
+    } else {
+      for (const group of groups) {
+        elements.searchResults.append(createSearchPageGroup(group, "notes", query));
+      }
+    }
+  } else if (state.pdfSearchStatus === "loading") {
+    const total = state.pdf?.numPages || 0;
+    const progress = state.pdfSearchProgress ? ` ${state.pdfSearchProgress} of ${total}` : "";
+    renderSearchMessage(`Preparing searchable text…${progress}`);
+  } else if (state.pdfSearchStatus === "error") {
+    renderSearchMessage("The PDF text could not be prepared for searching.");
+  } else if (state.pdfSearchStatus === "ready") {
+    if (!state.pdfSearchPages.some(({ text }) => text.length > 0)) {
+      renderSearchMessage("This PDF has no searchable text.");
+    } else if (!query) {
+      renderSearchMessage("Type to search the PDF text.");
+    } else {
+      const groups = searchPdfPages(query);
+      if (!groups.length) {
+        renderSearchMessage(`No matches for “${query}”.`);
+      } else {
+        for (const group of groups) {
+          elements.searchResults.append(createSearchPageGroup(group, "pdf", query));
+        }
+      }
+    }
+  } else {
+    renderSearchMessage("Preparing searchable text…");
+  }
+
+  elements.searchResults.scrollTop = previousScrollTop;
+}
+
+function activeSearchInput() {
+  return state.searchMode === "notes" ? elements.notesSearchInput : elements.pdfSearchInput;
+}
+
+function focusActiveSearchInput() {
+  const input = activeSearchInput();
+  input.focus();
+  input.select();
+}
+
+function renderSearchMessage(message) {
+  const element = document.createElement("p");
+  element.className = "search-empty";
+  element.textContent = message;
+  elements.searchResults.append(element);
+}
+
+function collectNoteGroups(query) {
+  const foldedQuery = query.toLocaleLowerCase();
+  const groups = [];
+  const pages = [...state.annotations.entries()].sort(([pageA], [pageB]) => pageA - pageB);
+
+  for (const [pageNumber, annotations] of pages) {
+    const notes = annotations
+      .filter((annotation) => {
+        if (annotation.type !== "note" || !annotation.text.trim()) return false;
+        return (
+          !foldedQuery ||
+          normalizeSearchQuery(annotation.text).toLocaleLowerCase().includes(foldedQuery)
+        );
+      })
+      .sort((noteA, noteB) => noteA.y - noteB.y || noteA.x - noteB.x);
+    if (notes.length) groups.push({ pageNumber, items: notes });
+  }
+
+  return groups;
+}
+
+function createSearchPageGroup(group, mode, query) {
+  const { pageNumber, items } = group;
+  const expanded = items.length > 1 && state.searchExpandedPages.has(pageNumber);
+  if (items.length === 1) state.searchExpandedPages.delete(pageNumber);
+  const section = document.createElement("section");
+  section.className = "search-page-group";
+  if (expanded) section.classList.add("is-expanded");
+
+  const summary = document.createElement("div");
+  summary.className = "search-page-summary";
+  if (items.length === 1) summary.classList.add("has-no-toggle");
+
+  const pageLink = document.createElement("button");
+  pageLink.className = "search-page-link";
+  pageLink.type = "button";
+  pageLink.addEventListener("click", () => goToPage(pageNumber));
+
+  const meta = document.createElement("span");
+  meta.className = "search-page-meta";
+  const pageLabel = document.createElement("span");
+  pageLabel.className = "search-page-number";
+  pageLabel.textContent = `Page ${pageNumber}`;
+  const count = document.createElement("span");
+  count.className = "search-page-count";
+  const noun = mode === "notes" ? "note" : "match";
+  const pluralNoun = mode === "notes" ? "notes" : "matches";
+  count.textContent = `${items.length} ${items.length === 1 ? noun : pluralNoun}`;
+  meta.append(pageLabel, count);
+
+  const preview = document.createElement("span");
+  preview.className = "search-page-preview";
+  appendSearchPreview(preview, items[0], mode, query);
+  pageLink.append(meta, preview);
+  summary.append(pageLink);
+
+  const children = document.createElement("div");
+  children.className = "search-page-children";
+  children.hidden = !expanded;
+  let childrenRendered = false;
+
+  const renderChildren = () => {
+    if (childrenRendered) return;
+    childrenRendered = true;
+    for (const item of items.slice(1)) {
+      const resultLink = document.createElement("button");
+      resultLink.className = "search-result-link";
+      resultLink.type = "button";
+      const resultPreview = document.createElement("span");
+      resultPreview.className = "search-result-preview";
+      appendSearchPreview(resultPreview, item, mode, query);
+      resultLink.append(resultPreview);
+      resultLink.addEventListener("click", () => {
+        if (mode === "notes") goToNote(pageNumber, item.id);
+        else goToPage(pageNumber);
+      });
+      children.append(resultLink);
+    }
+  };
+
+  if (items.length > 1) {
+    const toggle = document.createElement("button");
+    toggle.className = "search-page-toggle";
+    toggle.type = "button";
+    toggle.setAttribute("aria-expanded", String(expanded));
+    toggle.setAttribute(
+      "aria-label",
+      `${expanded ? "Hide" : "Show"} ${items.length - 1} more ${items.length === 2 ? noun : pluralNoun} on page ${pageNumber}`,
+    );
+    toggle.addEventListener("click", () => {
+      const shouldExpand = !state.searchExpandedPages.has(pageNumber);
+      if (shouldExpand) {
+        state.searchExpandedPages.add(pageNumber);
+        renderChildren();
+      } else {
+        state.searchExpandedPages.delete(pageNumber);
+      }
+      section.classList.toggle("is-expanded", shouldExpand);
+      toggle.setAttribute("aria-expanded", String(shouldExpand));
+      toggle.setAttribute(
+        "aria-label",
+        `${shouldExpand ? "Hide" : "Show"} ${items.length - 1} more ${items.length === 2 ? noun : pluralNoun} on page ${pageNumber}`,
+      );
+      children.hidden = !shouldExpand;
+    });
+    summary.append(toggle);
+  }
+
+  if (expanded) renderChildren();
+  section.append(summary, children);
+  return section;
+}
+
+function appendSearchPreview(container, item, mode, query) {
+  if (mode === "pdf") {
+    if (item.leadingEllipsis) container.append("…");
+    container.append(document.createTextNode(item.before));
+    const mark = document.createElement("mark");
+    mark.textContent = item.match;
+    container.append(mark, document.createTextNode(item.after));
+    if (item.trailingEllipsis) container.append("…");
+    return;
+  }
+
+  appendHighlightedText(container, truncatePreview(item.text), query);
+}
+
+function appendHighlightedText(container, text, query) {
+  if (!query) {
+    container.textContent = text;
+    return;
+  }
+
+  const matcher = new RegExp(escapeRegularExpression(query), "giu");
+  let cursor = 0;
+  let match;
+  while ((match = matcher.exec(text))) {
+    container.append(document.createTextNode(text.slice(cursor, match.index)));
+    const mark = document.createElement("mark");
+    mark.textContent = match[0];
+    container.append(mark);
+    cursor = match.index + match[0].length;
+  }
+  container.append(document.createTextNode(text.slice(cursor)));
+}
+
+function truncatePreview(text) {
+  const normalized = text.replace(/\s+/gu, " ").trim();
+  if (normalized.length <= NOTE_PREVIEW_LENGTH) return normalized;
+  return `${normalized.slice(0, NOTE_PREVIEW_LENGTH).trimEnd()}…`;
+}
+
+function goToNote(pageNumber, annotationId) {
+  const view = state.pageViews[pageNumber - 1];
+  const note = view?.noteLayer.querySelector(
+    `[data-annotation-id="${CSS.escape(annotationId)}"]`,
+  );
+  if (!note) {
+    goToPage(pageNumber);
+    return;
+  }
+
+  state.currentPage = pageNumber;
+  elements.currentPage.value = String(pageNumber);
+  note.scrollIntoView({
+    block: "center",
+    behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+  });
+  requestAnimationFrame(() => {
+    note.focus({ preventScroll: true });
+    placeCaretAtEnd(note);
+  });
+}
+
+async function preparePdfSearchIndex() {
+  if (!state.pdf || state.pdfSearchStatus !== "idle") return;
+  const openToken = state.openToken;
+  state.pdfSearchStatus = "loading";
+  state.pdfSearchProgress = 0;
+  state.pdfSearchPages = [];
+  renderSearchSidebar();
+
+  try {
+    for (const view of state.pageViews) {
+      const textContent = await view.pdfPage.getTextContent({
+        includeMarkedContent: true,
+        disableNormalization: false,
+      });
+      if (state.openToken !== openToken || !state.pdf) return;
+      state.pdfSearchPages.push({
+        pageNumber: view.pageNumber,
+        text: searchableTextFromContent(textContent),
+      });
+      state.pdfSearchProgress = view.pageNumber;
+      if (
+        view.pageNumber === 1 ||
+        view.pageNumber === state.pageViews.length ||
+        view.pageNumber % 10 === 0
+      ) {
+        renderSearchSidebar();
+      }
+    }
+
+    if (state.openToken !== openToken || !state.pdf) return;
+    state.pdfSearchStatus = "ready";
+    renderSearchSidebar();
+  } catch (error) {
+    if (state.openToken !== openToken || !state.pdf || error?.name === "AbortException") return;
+    console.error("PDF text could not be prepared for searching.", error);
+    state.pdfSearchStatus = "error";
+    renderSearchSidebar();
+  }
+}
+
+function searchableTextFromContent(textContent) {
+  let text = "";
+  for (const item of textContent.items) {
+    if (typeof item.str !== "string") continue;
+    text += item.str;
+    if (item.hasEOL) text += "\n";
+  }
+  return text.replace(/\s+/gu, " ").trim();
+}
+
+function searchPdfPages(query) {
+  const groups = [];
+  for (const page of state.pdfSearchPages) {
+    const matcher = new RegExp(escapeRegularExpression(query), "giu");
+    const matches = [];
+    let match;
+    while ((match = matcher.exec(page.text))) {
+      const start = Math.max(0, match.index - SEARCH_CONTEXT_LENGTH);
+      const end = Math.min(
+        page.text.length,
+        match.index + match[0].length + SEARCH_CONTEXT_LENGTH,
+      );
+      matches.push({
+        before: page.text.slice(start, match.index),
+        match: match[0],
+        after: page.text.slice(match.index + match[0].length, end),
+        leadingEllipsis: start > 0,
+        trailingEllipsis: end < page.text.length,
+      });
+    }
+    if (matches.length) groups.push({ pageNumber: page.pageNumber, items: matches });
+  }
+  return groups;
+}
+
+function normalizeSearchQuery(query) {
+  return query.replace(/\s+/gu, " ").trim();
+}
+
+function escapeRegularExpression(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function setHelpOpen(open, { restoreFocus = false } = {}) {
@@ -1015,6 +1434,9 @@ function persistAnnotations() {
     showToast("Notes could not be saved. Browser storage may be full.", 6000);
   }
   scheduleSidecarSave();
+  if (!elements.searchSidebar.hidden && state.searchMode === "notes") {
+    renderSearchSidebar();
+  }
 }
 
 async function saveNotesToFile() {
@@ -1133,6 +1555,9 @@ async function importSidecarFile(file, handle = null) {
     for (const view of state.pageViews) {
       updatePageDimensions(view);
       renderAnnotations(view);
+    }
+    if (!elements.searchSidebar.hidden && state.searchMode === "notes") {
+      renderSearchSidebar();
     }
 
     if (handle) {
@@ -1319,6 +1744,7 @@ function setReaderControlsEnabled(enabled) {
   elements.zoomReset.disabled = !enabled;
   elements.currentPage.disabled = !enabled;
   elements.notesButton.disabled = !enabled;
+  elements.searchButton.disabled = !enabled;
   elements.loadNotesButton.disabled = !enabled;
   elements.saveNotesButton.disabled = !enabled;
   updateTextSizeDisplay();
@@ -1336,6 +1762,7 @@ function setLoading(loading, message = "Opening PDF…") {
 }
 
 function destroyCurrentDocument() {
+  closeSearchSidebar();
   state.sidecarGeneration += 1;
   clearTimeout(state.sidecarSaveTimer);
   state.sidecarSaveTimer = null;
@@ -1356,6 +1783,15 @@ function destroyCurrentDocument() {
   state.annotations = new Map();
   state.undoStack = [];
   state.renderErrorShown = false;
+  state.searchMode = "notes";
+  state.searchExpandedPages.clear();
+  state.searchReturnFocus = null;
+  state.pdfSearchStatus = "idle";
+  state.pdfSearchPages = [];
+  state.pdfSearchProgress = 0;
+  elements.notesSearchInput.value = "";
+  elements.pdfSearchInput.value = "";
+  setSearchMode("notes");
   state.sidecarHandle = null;
   state.sidecarFileName = null;
   state.sidecarWriteInProgress = false;
