@@ -87,6 +87,7 @@ const state = {
   sidecarWritePending: false,
   sidecarGeneration: 0,
   renderErrorShown: false,
+  textSelectionMode: false,
 };
 
 bindControls();
@@ -182,6 +183,16 @@ function bindControls() {
   elements.workspace.addEventListener("scroll", scheduleCurrentPageUpdate, { passive: true });
   window.addEventListener("resize", scheduleVisiblePageRender, { passive: true });
   window.addEventListener("keydown", handleGlobalKeydown);
+  window.addEventListener("keyup", handleGlobalKeyup);
+  window.addEventListener("blur", () => setTextSelectionMode(false));
+  window.addEventListener("contextmenu", () => setTextSelectionMode(false));
+  window.addEventListener(
+    "pointermove",
+    (event) => {
+      if (state.textSelectionMode !== event.shiftKey) setTextSelectionMode(event.shiftKey);
+    },
+    { capture: true, passive: true },
+  );
 
   window.addEventListener("dragover", (event) => {
     if (hasPdfFile(event.dataTransfer)) event.preventDefault();
@@ -312,6 +323,9 @@ function createPageView(pageNumber, pdfPage, baseViewport) {
   placeholder.className = "page-placeholder";
   placeholder.textContent = `Page ${pageNumber}`;
 
+  const textLayerElement = document.createElement("div");
+  textLayerElement.className = "pdf-text-layer";
+
   const surface = document.createElement("div");
   surface.className = "annotation-surface";
   surface.dataset.pageNumber = String(pageNumber);
@@ -327,7 +341,7 @@ function createPageView(pageNumber, pdfPage, baseViewport) {
   noteLayer.className = "annotation-notes";
 
   surface.append(lineSvg, noteLayer);
-  element.append(canvas, placeholder, surface);
+  element.append(canvas, placeholder, textLayerElement, surface);
 
   const view = {
     pageNumber,
@@ -336,6 +350,10 @@ function createPageView(pageNumber, pdfPage, baseViewport) {
     element,
     canvas,
     placeholder,
+    textLayerElement,
+    textLayer: null,
+    textLayerRendered: false,
+    pendingTextViewport: null,
     surface,
     lineSvg,
     noteLayer,
@@ -356,11 +374,19 @@ function updatePageDimensions(view) {
   const viewport = view.pdfPage.getViewport({ scale: state.zoom });
   view.element.style.width = `${viewport.width}px`;
   view.element.style.height = `${viewport.height}px`;
+  view.element.style.setProperty("--total-scale-factor", viewport.scale);
+  view.element.style.setProperty("--scale-round-x", "1px");
+  view.element.style.setProperty("--scale-round-y", "1px");
   view.element.style.setProperty("--annotation-scale", state.zoom);
   view.element.style.setProperty(
     "--annotation-font-size",
     `${state.noteFontSize * state.zoom}px`,
   );
+  if (view.textLayerRendered) {
+    view.textLayer.update({ viewport });
+  } else if (view.textLayer) {
+    view.pendingTextViewport = viewport;
+  }
 }
 
 function handlePageVisibility(entries) {
@@ -395,6 +421,7 @@ async function renderPage(view) {
 
   const requestedZoom = state.zoom;
   const viewport = view.pdfPage.getViewport({ scale: requestedZoom });
+  ensureTextLayer(view, viewport);
   const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
   const context = view.canvas.getContext("2d", { alpha: false });
 
@@ -437,6 +464,47 @@ async function renderPage(view) {
       renderPage(view);
     }
   }
+}
+
+function ensureTextLayer(view, viewport) {
+  if (view.textLayer) {
+    if (view.textLayerRendered) {
+      view.textLayer.update({ viewport });
+    } else {
+      view.pendingTextViewport = viewport;
+    }
+    return;
+  }
+
+  const textLayer = new state.pdfjs.TextLayer({
+    textContentSource: view.pdfPage.streamTextContent({
+      includeMarkedContent: true,
+      disableNormalization: true,
+    }),
+    container: view.textLayerElement,
+    viewport,
+  });
+  view.textLayer = textLayer;
+  textLayer
+    .render()
+    .then(() => {
+      if (view.textLayer !== textLayer) return;
+      view.textLayerRendered = true;
+      if (view.pendingTextViewport) {
+        textLayer.update({ viewport: view.pendingTextViewport });
+        view.pendingTextViewport = null;
+      }
+    })
+    .catch((error) => {
+      if (error?.name === "AbortException") return;
+      console.error(`Text layer for page ${view.pageNumber} could not be rendered.`, error);
+      if (view.textLayer === textLayer) {
+        view.textLayer = null;
+        view.textLayerRendered = false;
+        view.pendingTextViewport = null;
+        view.textLayerElement.replaceChildren();
+      }
+    });
 }
 
 function releasePageCanvas(view) {
@@ -621,8 +689,24 @@ function bindAnnotationSurface(view) {
   let gesture = null;
   let preview = null;
 
+  const cancelGesture = () => {
+    if (gesture && view.surface.hasPointerCapture(gesture.pointerId)) {
+      view.surface.releasePointerCapture(gesture.pointerId);
+    }
+    gesture = null;
+    preview?.remove();
+    preview = null;
+  };
+
   view.surface.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0 || event.target.closest(".annotation-note")) return;
+    if (
+      event.button !== 0 ||
+      event.shiftKey ||
+      state.textSelectionMode ||
+      event.target.closest(".annotation-note")
+    ) {
+      return;
+    }
 
     const point = getSurfacePoint(event, view.surface);
     gesture = {
@@ -638,6 +722,10 @@ function bindAnnotationSurface(view) {
 
   view.surface.addEventListener("pointermove", (event) => {
     if (!gesture || event.pointerId !== gesture.pointerId) return;
+    if (state.textSelectionMode) {
+      cancelGesture();
+      return;
+    }
     const distance = Math.hypot(
       event.clientX - gesture.startClientX,
       event.clientY - gesture.startClientY,
@@ -655,6 +743,10 @@ function bindAnnotationSurface(view) {
 
   view.surface.addEventListener("pointerup", (event) => {
     if (!gesture || event.pointerId !== gesture.pointerId) return;
+    if (state.textSelectionMode) {
+      cancelGesture();
+      return;
+    }
     const completedGesture = gesture;
     gesture = null;
     preview?.remove();
@@ -668,11 +760,7 @@ function bindAnnotationSurface(view) {
     }
   });
 
-  view.surface.addEventListener("pointercancel", () => {
-    gesture = null;
-    preview?.remove();
-    preview = null;
-  });
+  view.surface.addEventListener("pointercancel", cancelGesture);
 
   view.surface.addEventListener("contextmenu", (event) => {
     const target = event.target.closest("[data-annotation-id]");
@@ -841,6 +929,8 @@ function undoLastAnnotationAction() {
 }
 
 function handleGlobalKeydown(event) {
+  if (event.key === "Shift") setTextSelectionMode(true);
+
   const modifier = event.metaKey || event.ctrlKey;
   const editingNote = event.target.closest?.(".annotation-note");
 
@@ -880,6 +970,16 @@ function handleGlobalKeydown(event) {
     event.preventDefault();
     setZoom(1);
   }
+}
+
+function handleGlobalKeyup(event) {
+  if (event.key === "Shift") setTextSelectionMode(false);
+}
+
+function setTextSelectionMode(enabled) {
+  if (state.textSelectionMode === enabled) return;
+  state.textSelectionMode = enabled;
+  elements.viewer.classList.toggle("is-text-selection-mode", enabled);
 }
 
 function setHelpOpen(open, { restoreFocus = false } = {}) {
@@ -1241,7 +1341,10 @@ function destroyCurrentDocument() {
   state.sidecarSaveTimer = null;
   state.pageObserver?.disconnect();
   state.pageObserver = null;
-  for (const view of state.pageViews) view.renderTask?.cancel();
+  for (const view of state.pageViews) {
+    view.renderTask?.cancel();
+    view.textLayer?.cancel();
+  }
   state.pageViews = [];
   elements.viewer.replaceChildren();
   if (state.loadingTask) state.loadingTask.destroy();
