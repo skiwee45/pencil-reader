@@ -11,6 +11,7 @@
 - `Cmd/Ctrl + Z` to undo the last action.
 - `Cmd/Ctrl + F` to browse and search notes by page.
 - `Cmd/Ctrl + Shift + F` to search embedded PDF text by page.
+- Rotate every page left or right while keeping the view in the notes backup.
 
 Saves notes in separate file, doesn't edit pdfs.
 

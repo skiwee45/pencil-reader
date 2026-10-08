@@ -111,6 +111,35 @@
           <span id="page-count">–</span>
         </div>
 
+        <div class="rotation-controls" aria-label="Page rotation controls">
+          <button
+            class="rotation-button"
+            id="rotate-left"
+            type="button"
+            aria-label="Rotate PDF counterclockwise"
+            title="Rotate PDF counterclockwise"
+            disabled
+          >
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M8 5H4v4" />
+              <path d="M4.8 8.2A8 8 0 1 1 5.7 17" />
+            </svg>
+          </button>
+          <button
+            class="rotation-button"
+            id="rotate-right"
+            type="button"
+            aria-label="Rotate PDF clockwise"
+            title="Rotate PDF clockwise"
+            disabled
+          >
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M16 5h4v4" />
+              <path d="M19.2 8.2A8 8 0 1 0 18.3 17" />
+            </svg>
+          </button>
+        </div>
+
         <div class="zoom-controls" aria-label="Zoom controls">
           <button class="icon-button" id="zoom-out" type="button" aria-label="Zoom out" disabled>−</button>
           <button class="zoom-value" id="zoom-reset" type="button" aria-label="Reset zoom" disabled>100%</button>

@@ -1,9 +1,11 @@
 import {
   cloneAnnotation,
   loadAnnotations,
+  loadDocumentView,
   loadPreferences,
   deserializeAnnotationPages,
   saveAnnotations,
+  saveDocumentView,
   savePreferences,
   serializeAnnotationPages,
 } from "./storage.js";
@@ -51,12 +53,15 @@ const elements = {
   documentTitle: document.querySelector("#document-title"),
   currentPage: document.querySelector("#current-page"),
   pageCount: document.querySelector("#page-count"),
+  rotateLeft: document.querySelector("#rotate-left"),
+  rotateRight: document.querySelector("#rotate-right"),
   zoomOut: document.querySelector("#zoom-out"),
   zoomIn: document.querySelector("#zoom-in"),
   zoomReset: document.querySelector("#zoom-reset"),
   textSizeDown: document.querySelector("#text-size-down"),
   textSizeUp: document.querySelector("#text-size-up"),
   textSizeInput: document.querySelector("#text-size-input"),
+  textSizeControls: document.querySelector(".text-size-controls"),
   helpMenu: document.querySelector("#help-menu"),
   helpButton: document.querySelector("#help-button"),
   helpPopover: document.querySelector("#help-popover"),
@@ -86,7 +91,9 @@ const state = {
   pageViews: [],
   pageObserver: null,
   zoom: 1,
+  rotation: 0,
   noteFontSize: preferences.noteFontSize,
+  selectedNote: null,
   currentPage: 1,
   undoStack: [],
   scrollFrame: null,
@@ -147,11 +154,13 @@ function bindControls() {
   elements.zoomOut.addEventListener("click", () => setZoom(state.zoom - ZOOM_STEP));
   elements.zoomIn.addEventListener("click", () => setZoom(state.zoom + ZOOM_STEP));
   elements.zoomReset.addEventListener("click", () => setZoom(1));
+  elements.rotateLeft.addEventListener("click", () => rotateDocument(-90));
+  elements.rotateRight.addEventListener("click", () => rotateDocument(90));
   elements.textSizeDown.addEventListener("click", () => {
-    setNoteFontSize(state.noteFontSize - NOTE_FONT_SIZE_STEP);
+    setNoteFontSize(currentNoteFontSize() - NOTE_FONT_SIZE_STEP);
   });
   elements.textSizeUp.addEventListener("click", () => {
-    setNoteFontSize(state.noteFontSize + NOTE_FONT_SIZE_STEP);
+    setNoteFontSize(currentNoteFontSize() + NOTE_FONT_SIZE_STEP);
   });
   elements.textSizeInput.addEventListener("focus", () => elements.textSizeInput.select());
   elements.textSizeInput.addEventListener("input", () => {
@@ -165,11 +174,19 @@ function bindControls() {
     if (event.key === "Escape") {
       event.preventDefault();
       elements.textSizeInput.dataset.cancelChange = "true";
-      elements.textSizeInput.value = String(state.noteFontSize);
+      elements.textSizeInput.value = String(currentNoteFontSize());
       elements.textSizeInput.blur();
     }
   });
-  elements.textSizeInput.addEventListener("blur", commitNoteFontSize);
+  elements.textSizeInput.addEventListener("blur", (event) => {
+    commitNoteFontSize();
+    if (
+      !elements.textSizeControls.contains(event.relatedTarget) &&
+      !event.relatedTarget?.closest?.(".annotation-note")
+    ) {
+      clearSelectedNote();
+    }
+  });
   elements.currentPage.addEventListener("focus", () => elements.currentPage.select());
   elements.currentPage.addEventListener("input", () => {
     elements.currentPage.value = elements.currentPage.value.replace(/\D/g, "");
@@ -213,11 +230,28 @@ function bindControls() {
     });
   }
   document.addEventListener("pointerdown", (event) => {
+    if (
+      state.selectedNote &&
+      !event.target.closest(".annotation-note") &&
+      !elements.textSizeControls.contains(event.target) &&
+      document.activeElement !== elements.textSizeInput
+    ) {
+      clearSelectedNote();
+    }
     if (!elements.helpPopover.hidden && !elements.helpMenu.contains(event.target)) {
       setHelpOpen(false);
     }
     if (!elements.notesPopover.hidden && !elements.notesMenu.contains(event.target)) {
       setNotesOpen(false);
+    }
+  });
+  document.addEventListener("focusin", (event) => {
+    if (
+      state.selectedNote &&
+      !event.target.closest?.(".annotation-note") &&
+      !elements.textSizeControls.contains(event.target)
+    ) {
+      clearSelectedNote();
     }
   });
 
@@ -293,6 +327,14 @@ async function openPdf(file) {
     state.documentId = state.pdf.fingerprints?.[0] || `${file.name}:${file.size}:${file.lastModified}`;
     state.documentName = file.name;
     state.annotations = loadAnnotations(state.documentId);
+    if (ensureNoteFontSizes(state.annotations, state.noteFontSize)) {
+      try {
+        saveAnnotations(state.documentId, state.annotations);
+      } catch (error) {
+        console.error(error);
+      }
+    }
+    state.rotation = loadDocumentView(state.documentId).rotation;
     state.undoStack = [];
     state.zoom = 1;
 
@@ -343,7 +385,7 @@ async function buildPageViews(openToken) {
     elements.loadingMessage.textContent = `Preparing page ${pageNumber} of ${state.pdf.numPages}…`;
     const pdfPage = await state.pdf.getPage(pageNumber);
     if (state.openToken !== openToken) return;
-    const baseViewport = pdfPage.getViewport({ scale: 1 });
+    const baseViewport = getPageViewport(pdfPage, 1, state.rotation);
     const view = createPageView(pageNumber, pdfPage, baseViewport);
     state.pageViews.push(view);
     elements.viewer.append(view.element);
@@ -399,9 +441,10 @@ function createPageView(pageNumber, pdfPage, baseViewport) {
     lineSvg,
     noteLayer,
     renderTask: null,
-    renderScale: null,
-    renderingScale: null,
-    failedRenderScale: null,
+    renderKey: null,
+    renderingKey: null,
+    failedRenderKey: null,
+    overflowFrame: null,
     visible: false,
   };
 
@@ -411,18 +454,26 @@ function createPageView(pageNumber, pdfPage, baseViewport) {
   return view;
 }
 
+function getPageViewport(pdfPage, scale, rotation) {
+  return pdfPage.getViewport({
+    scale,
+    rotation: normalizeRotation((pdfPage.rotate || 0) + rotation),
+  });
+}
+
+function currentRenderKey() {
+  return `${state.zoom}:${state.rotation}`;
+}
+
 function updatePageDimensions(view) {
-  const viewport = view.pdfPage.getViewport({ scale: state.zoom });
+  const viewport = getPageViewport(view.pdfPage, state.zoom, state.rotation);
   view.element.style.width = `${viewport.width}px`;
   view.element.style.height = `${viewport.height}px`;
   view.element.style.setProperty("--total-scale-factor", viewport.scale);
   view.element.style.setProperty("--scale-round-x", "1px");
   view.element.style.setProperty("--scale-round-y", "1px");
-  view.element.style.setProperty("--annotation-scale", state.zoom);
-  view.element.style.setProperty(
-    "--annotation-font-size",
-    `${state.noteFontSize * state.zoom}px`,
-  );
+  updateRenderedNoteFontSizes(view);
+  revealAnnotationOverflow(view);
   if (view.textLayerRendered) {
     view.textLayer.update({ viewport });
   } else if (view.textLayer) {
@@ -446,22 +497,24 @@ function handlePageVisibility(entries) {
 }
 
 async function renderPage(view) {
+  const requestedKey = currentRenderKey();
   if (
     !state.pdf ||
     !view.visible ||
-    view.renderScale === state.zoom ||
-    view.failedRenderScale === state.zoom
+    view.renderKey === requestedKey ||
+    view.failedRenderKey === requestedKey
   ) {
     return;
   }
 
   if (view.renderTask) {
-    if (view.renderingScale !== state.zoom) view.renderTask.cancel();
+    if (view.renderingKey !== requestedKey) view.renderTask.cancel();
     return;
   }
 
   const requestedZoom = state.zoom;
-  const viewport = view.pdfPage.getViewport({ scale: requestedZoom });
+  const requestedRotation = state.rotation;
+  const viewport = getPageViewport(view.pdfPage, requestedZoom, requestedRotation);
   ensureTextLayer(view, viewport);
   const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
   const context = view.canvas.getContext("2d", { alpha: false });
@@ -473,13 +526,13 @@ async function renderPage(view) {
 
   const transform = pixelRatio === 1 ? null : [pixelRatio, 0, 0, pixelRatio, 0, 0];
   view.renderTask = view.pdfPage.render({ canvasContext: context, transform, viewport });
-  view.renderingScale = requestedZoom;
+  view.renderingKey = requestedKey;
 
   try {
     await view.renderTask.promise;
-    if (requestedZoom === state.zoom) {
-      view.renderScale = requestedZoom;
-      view.failedRenderScale = null;
+    if (requestedZoom === state.zoom && requestedRotation === state.rotation) {
+      view.renderKey = requestedKey;
+      view.failedRenderKey = null;
       view.element.classList.remove("has-render-error");
       view.placeholder.textContent = `Page ${view.pageNumber}`;
       view.placeholder.hidden = true;
@@ -487,7 +540,7 @@ async function renderPage(view) {
   } catch (error) {
     if (error?.name !== "RenderingCancelledException") {
       console.error(error);
-      view.failedRenderScale = requestedZoom;
+      view.failedRenderKey = requestedKey;
       view.element.classList.add("has-render-error");
       view.placeholder.textContent = `Page ${view.pageNumber} could not be rendered`;
       view.placeholder.hidden = false;
@@ -498,10 +551,10 @@ async function renderPage(view) {
     }
   } finally {
     view.renderTask = null;
-    view.renderingScale = null;
+    view.renderingKey = null;
     if (!view.visible) {
       clearPageCanvas(view);
-    } else if (view.renderScale !== state.zoom) {
+    } else if (view.renderKey !== currentRenderKey()) {
       renderPage(view);
     }
   }
@@ -557,7 +610,7 @@ function releasePageCanvas(view) {
 }
 
 function clearPageCanvas(view) {
-  view.renderScale = null;
+  view.renderKey = null;
   view.canvas.width = 1;
   view.canvas.height = 1;
   view.placeholder.hidden = false;
@@ -574,7 +627,7 @@ function setZoom(nextZoom) {
   updateZoomControlState();
 
   for (const view of state.pageViews) {
-    view.renderScale = null;
+    view.renderKey = null;
     updatePageDimensions(view);
   }
 
@@ -590,9 +643,54 @@ function setZoom(nextZoom) {
   scheduleCurrentPageUpdate();
 }
 
+function rotateDocument(delta) {
+  if (!state.pdf) return;
+  setDocumentRotation(state.rotation + delta);
+}
+
+function setDocumentRotation(nextRotation, { persist = true } = {}) {
+  const rotation = normalizeRotation(nextRotation);
+  if (!state.pdf || rotation === state.rotation) return;
+
+  const anchor = getViewportAnchor();
+  state.rotation = rotation;
+
+  for (const view of state.pageViews) {
+    view.renderKey = null;
+    view.failedRenderKey = null;
+    updatePageDimensions(view);
+    renderAnnotations(view);
+  }
+  if (!elements.searchSidebar.hidden && state.searchMode === "notes") {
+    renderSearchSidebar();
+  }
+
+  if (anchor) {
+    const anchoredView = state.pageViews[anchor.pageNumber - 1];
+    elements.workspace.scrollTop =
+      anchoredView.element.offsetTop +
+      anchoredView.element.offsetHeight * anchor.pageRatio -
+      elements.workspace.clientHeight / 2;
+  }
+
+  if (persist) {
+    try {
+      saveDocumentView(state.documentId, { rotation: state.rotation });
+    } catch (error) {
+      console.error(error);
+      showToast("The rotated view could not be saved in this browser.", 4000);
+    }
+    scheduleSidecarSave();
+  }
+
+  scheduleVisiblePageRender();
+  scheduleCurrentPageUpdate();
+}
+
 function setNoteFontSize(nextSize) {
   const size = clamp(nextSize, MIN_NOTE_FONT_SIZE, MAX_NOTE_FONT_SIZE);
-  if (size === state.noteFontSize) {
+  const selectedAnnotation = selectedNoteAnnotation();
+  if (size === state.noteFontSize && (!selectedAnnotation || size === selectedAnnotation.fontSize)) {
     updateTextSizeDisplay();
     return;
   }
@@ -605,9 +703,20 @@ function setNoteFontSize(nextSize) {
     showToast("Text size preference could not be saved.", 4000);
   }
 
-  for (const view of state.pageViews) updatePageDimensions(view);
+  if (selectedAnnotation) {
+    selectedAnnotation.fontSize = size;
+    const selection = state.selectedNote;
+    const view = state.pageViews[selection.pageNumber - 1];
+    const note = view?.noteLayer.querySelector(
+      `[data-annotation-id="${CSS.escape(selection.annotationId)}"]`,
+    );
+    if (note) note.style.fontSize = `${size * state.zoom}px`;
+    revealAnnotationOverflow(view);
+    persistAnnotations();
+  } else {
+    scheduleSidecarSave();
+  }
   updateTextSizeDisplay();
-  scheduleSidecarSave();
 }
 
 function commitNoteFontSize() {
@@ -618,7 +727,7 @@ function commitNoteFontSize() {
 
   const size = Number(elements.textSizeInput.value);
   if (!Number.isInteger(size) || size < MIN_NOTE_FONT_SIZE || size > MAX_NOTE_FONT_SIZE) {
-    elements.textSizeInput.value = String(state.noteFontSize);
+    elements.textSizeInput.value = String(currentNoteFontSize());
     showToast(`Choose a text size from ${MIN_NOTE_FONT_SIZE} to ${MAX_NOTE_FONT_SIZE}px.`, 2500);
     return;
   }
@@ -627,12 +736,51 @@ function commitNoteFontSize() {
 }
 
 function updateTextSizeDisplay() {
+  const size = currentNoteFontSize();
   if (document.activeElement !== elements.textSizeInput) {
-    elements.textSizeInput.value = String(state.noteFontSize);
+    elements.textSizeInput.value = String(size);
   }
-  elements.textSizeDown.disabled = !state.pdf || state.noteFontSize <= MIN_NOTE_FONT_SIZE;
-  elements.textSizeUp.disabled = !state.pdf || state.noteFontSize >= MAX_NOTE_FONT_SIZE;
+  elements.textSizeDown.disabled = !state.pdf || size <= MIN_NOTE_FONT_SIZE;
+  elements.textSizeUp.disabled = !state.pdf || size >= MAX_NOTE_FONT_SIZE;
   elements.textSizeInput.disabled = !state.pdf;
+}
+
+function currentNoteFontSize() {
+  return selectedNoteAnnotation()?.fontSize ?? state.noteFontSize;
+}
+
+function selectedNoteAnnotation() {
+  const selection = state.selectedNote;
+  if (!selection) return null;
+
+  const annotation = state.annotations
+    .get(selection.pageNumber)
+    ?.find(({ id, type }) => id === selection.annotationId && type === "note");
+  if (!annotation) state.selectedNote = null;
+  return annotation ?? null;
+}
+
+function selectNote(pageNumber, annotationId) {
+  state.selectedNote = { pageNumber, annotationId };
+  updateTextSizeDisplay();
+}
+
+function clearSelectedNote() {
+  if (!state.selectedNote) return;
+  state.selectedNote = null;
+  updateTextSizeDisplay();
+}
+
+function updateRenderedNoteFontSizes(view) {
+  const notes = new Map(
+    pageAnnotations(view.pageNumber)
+      .filter(({ type }) => type === "note")
+      .map((annotation) => [annotation.id, annotation]),
+  );
+  for (const note of view.noteLayer.querySelectorAll(".annotation-note")) {
+    const annotation = notes.get(note.dataset.annotationId);
+    if (annotation) note.style.fontSize = `${noteFontSize(annotation) * state.zoom}px`;
+  }
 }
 
 function getViewportAnchor() {
@@ -812,13 +960,15 @@ function bindAnnotationSurface(view) {
 }
 
 function addLine(view, start, end) {
+  const canonicalStart = rotatePoint(start, -state.rotation);
+  const canonicalEnd = rotatePoint(end, -state.rotation);
   const annotation = {
     id: createId(),
     type: "line",
-    x1: start.x,
-    y1: start.y,
-    x2: end.x,
-    y2: end.y,
+    x1: canonicalStart.x,
+    y1: canonicalStart.y,
+    x2: canonicalEnd.x,
+    y2: canonicalEnd.y,
     persisted: true,
   };
   pageAnnotations(view.pageNumber).push(annotation);
@@ -828,12 +978,15 @@ function addLine(view, start, end) {
 }
 
 function addNote(view, point) {
+  const canonicalPoint = rotatePoint(point, -state.rotation);
   const annotation = {
     id: createId(),
     type: "note",
-    x: point.x,
-    y: point.y,
+    x: canonicalPoint.x,
+    y: canonicalPoint.y,
     text: "",
+    rotation: state.rotation,
+    fontSize: state.noteFontSize,
     persisted: false,
   };
   pageAnnotations(view.pageNumber).push(annotation);
@@ -863,8 +1016,8 @@ function renderAnnotations(view, focusId = null) {
       group.dataset.annotationId = annotation.id;
 
       const visibleLine = createSvgLine(
-        { x: annotation.x1, y: annotation.y1 },
-        { x: annotation.x2, y: annotation.y2 },
+        rotatePoint({ x: annotation.x1, y: annotation.y1 }, state.rotation),
+        rotatePoint({ x: annotation.x2, y: annotation.y2 }, state.rotation),
       );
       const hitbox = visibleLine.cloneNode();
       hitbox.classList.remove("annotation-line");
@@ -885,7 +1038,40 @@ function renderAnnotations(view, focusId = null) {
   }
 }
 
+function revealAnnotationOverflow(view) {
+  if (!view) return;
+  if (view.overflowFrame) cancelAnimationFrame(view.overflowFrame);
+  view.overflowFrame = requestAnimationFrame(() => {
+    view.overflowFrame = null;
+    if (!view.element.isConnected) return;
+
+    // While editing, the browser scrolls this clipped page automatically to
+    // keep an overflowing caret visible. Restore that derived position when
+    // saved notes are rendered without a caret. Measure only notes: PDF.js's
+    // transformed text layer can have a much larger internal scroll extent.
+    const pageRect = view.element.getBoundingClientRect();
+    let rightEdge = view.element.clientWidth;
+    let bottomEdge = view.element.clientHeight;
+    for (const note of view.noteLayer.querySelectorAll(".annotation-note")) {
+      const noteRect = note.getBoundingClientRect();
+      rightEdge = Math.max(
+        rightEdge,
+        noteRect.right - pageRect.left + view.element.scrollLeft,
+      );
+      bottomEdge = Math.max(
+        bottomEdge,
+        noteRect.bottom - pageRect.top + view.element.scrollTop,
+      );
+    }
+
+    view.element.scrollLeft = Math.max(0, Math.ceil(rightEdge - view.element.clientWidth));
+    view.element.scrollTop = Math.max(0, Math.ceil(bottomEdge - view.element.clientHeight));
+  });
+}
+
 function createNoteElement(view, annotation) {
+  const anchor = rotatePoint({ x: annotation.x, y: annotation.y }, state.rotation);
+  const noteRotation = normalizeRotation(state.rotation - (annotation.rotation || 0));
   const note = document.createElement("div");
   note.className = "annotation-note";
   note.dataset.annotationId = annotation.id;
@@ -893,11 +1079,14 @@ function createNoteElement(view, annotation) {
   note.spellcheck = true;
   note.setAttribute("role", "textbox");
   note.setAttribute("aria-label", `Note on page ${view.pageNumber}`);
-  note.style.left = `${annotation.x * 100}%`;
-  note.style.top = `${annotation.y * 100}%`;
+  note.style.left = `${anchor.x * 100}%`;
+  note.style.top = `${anchor.y * 100}%`;
+  note.style.transform = `rotate(${noteRotation}deg)`;
+  note.style.fontSize = `${noteFontSize(annotation) * state.zoom}px`;
   note.textContent = annotation.text;
 
   note.addEventListener("pointerdown", (event) => event.stopPropagation());
+  note.addEventListener("focus", () => selectNote(view.pageNumber, annotation.id));
   note.addEventListener("input", () => {
     annotation.text = normalizeNoteText(note.innerText);
     if (annotation.text && annotation.persisted === false) {
@@ -922,13 +1111,14 @@ function createNoteElement(view, annotation) {
   note.addEventListener("keydown", (event) => {
     if (event.key === "Escape") note.blur();
   });
-  note.addEventListener("blur", () => {
+  note.addEventListener("blur", (event) => {
     annotation.text = normalizeNoteText(note.innerText);
     if (!annotation.text) {
       deleteAnnotation(view.pageNumber, annotation.id, { recordUndo: false });
     } else {
       persistAnnotations();
     }
+    if (!elements.textSizeControls.contains(event.relatedTarget)) clearSelectedNote();
   });
 
   return note;
@@ -1158,7 +1348,11 @@ function collectNoteGroups(query) {
           normalizeSearchQuery(annotation.text).toLocaleLowerCase().includes(foldedQuery)
         );
       })
-      .sort((noteA, noteB) => noteA.y - noteB.y || noteA.x - noteB.x);
+      .sort((noteA, noteB) => {
+        const anchorA = rotatePoint(noteA, state.rotation);
+        const anchorB = rotatePoint(noteB, state.rotation);
+        return anchorA.y - anchorB.y || anchorA.x - anchorB.x;
+      });
     if (notes.length) groups.push({ pageNumber, items: notes });
   }
 
@@ -1545,17 +1739,36 @@ async function importSidecarFile(file, handle = null) {
       }
       updateTextSizeDisplay();
     }
+    ensureNoteFontSizes(state.annotations, state.noteFontSize);
+
+    const rotationAnchor = getViewportAnchor();
+    const savedRotation = sidecar.preferences?.rotation;
+    state.rotation =
+      Number.isInteger(savedRotation) && savedRotation % 90 === 0
+        ? normalizeRotation(savedRotation)
+        : 0;
 
     try {
       saveAnnotations(state.documentId, state.annotations);
+      saveDocumentView(state.documentId, { rotation: state.rotation });
     } catch (error) {
       console.error(error);
       showToast("Notes loaded, but the browser backup could not be updated.", 5000);
     }
     for (const view of state.pageViews) {
+      view.renderKey = null;
+      view.failedRenderKey = null;
       updatePageDimensions(view);
       renderAnnotations(view);
     }
+    if (rotationAnchor) {
+      const anchoredView = state.pageViews[rotationAnchor.pageNumber - 1];
+      elements.workspace.scrollTop =
+        anchoredView.element.offsetTop +
+        anchoredView.element.offsetHeight * rotationAnchor.pageRatio -
+        elements.workspace.clientHeight / 2;
+    }
+    scheduleVisiblePageRender();
     if (!elements.searchSidebar.hidden && state.searchMode === "notes") {
       renderSearchSidebar();
     }
@@ -1657,7 +1870,10 @@ function createSidecar() {
       pageCount: state.pdf?.numPages ?? null,
     },
     savedAt: new Date().toISOString(),
-    preferences: { noteFontSize: state.noteFontSize },
+    preferences: {
+      noteFontSize: state.noteFontSize,
+      rotation: state.rotation,
+    },
     pages: serializeAnnotationPages(state.annotations),
   };
 }
@@ -1742,6 +1958,8 @@ function setReaderControlsEnabled(enabled) {
   elements.zoomOut.disabled = !enabled || state.zoom <= MIN_ZOOM;
   elements.zoomIn.disabled = !enabled || state.zoom >= MAX_ZOOM;
   elements.zoomReset.disabled = !enabled;
+  elements.rotateLeft.disabled = !enabled;
+  elements.rotateRight.disabled = !enabled;
   elements.currentPage.disabled = !enabled;
   elements.notesButton.disabled = !enabled;
   elements.searchButton.disabled = !enabled;
@@ -1769,6 +1987,7 @@ function destroyCurrentDocument() {
   state.pageObserver?.disconnect();
   state.pageObserver = null;
   for (const view of state.pageViews) {
+    if (view.overflowFrame) cancelAnimationFrame(view.overflowFrame);
     view.renderTask?.cancel();
     view.textLayer?.cancel();
   }
@@ -1783,6 +2002,8 @@ function destroyCurrentDocument() {
   state.annotations = new Map();
   state.undoStack = [];
   state.renderErrorShown = false;
+  state.rotation = 0;
+  state.selectedNote = null;
   state.searchMode = "notes";
   state.searchExpandedPages.clear();
   state.searchReturnFocus = null;
@@ -1845,4 +2066,42 @@ function createId() {
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+function noteFontSize(annotation) {
+  return isValidNoteFontSize(annotation.fontSize) ? annotation.fontSize : state.noteFontSize;
+}
+
+function isValidNoteFontSize(value) {
+  return Number.isInteger(value) && value >= MIN_NOTE_FONT_SIZE && value <= MAX_NOTE_FONT_SIZE;
+}
+
+function ensureNoteFontSizes(pages, fallbackSize) {
+  let changed = false;
+  for (const annotations of pages.values()) {
+    for (const annotation of annotations) {
+      if (annotation.type === "note" && !isValidNoteFontSize(annotation.fontSize)) {
+        annotation.fontSize = fallbackSize;
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
+function normalizeRotation(rotation) {
+  return ((Math.round(rotation / 90) * 90) % 360 + 360) % 360;
+}
+
+function rotatePoint(point, rotation) {
+  switch (normalizeRotation(rotation)) {
+    case 90:
+      return { x: 1 - point.y, y: point.x };
+    case 180:
+      return { x: 1 - point.x, y: 1 - point.y };
+    case 270:
+      return { x: point.y, y: 1 - point.x };
+    default:
+      return { x: point.x, y: point.y };
+  }
 }

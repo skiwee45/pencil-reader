@@ -55,6 +55,7 @@ button {
 
 .toolbar__identity,
 .toolbar__reading-controls,
+.rotation-controls,
 .zoom-controls,
 .text-size-controls {
   display: flex;
@@ -350,6 +351,7 @@ button {
   color: #aaa79e;
 }
 
+.rotation-controls,
 .zoom-controls,
 .text-size-controls {
   height: 34px;
@@ -361,6 +363,53 @@ button {
 
 .text-size-controls {
   flex: none;
+}
+
+.rotation-controls {
+  flex: none;
+}
+
+.rotation-button {
+  display: grid;
+  width: 35px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #55534c;
+  cursor: pointer;
+  place-items: center;
+}
+
+.rotation-button + .rotation-button {
+  border-left: 1px solid #e4e1d9;
+}
+
+.rotation-button svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
+}
+
+.rotation-button:not(:disabled):hover {
+  background: #f0eee8;
+}
+
+.rotation-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.rotation-button:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, white);
+  outline-offset: -2px;
 }
 
 .icon-button,
@@ -1171,12 +1220,13 @@ button {
   color: var(--pencil);
   cursor: text;
   font-family: Georgia, "Times New Roman", serif;
-  font-size: var(--annotation-font-size, 16px);
+  font-size: 16px;
   line-height: 1.4;
   caret-color: #1d5137;
   overflow: visible;
   pointer-events: auto;
   tab-size: 4;
+  transform-origin: top left;
   user-select: text;
   white-space: pre;
 }
